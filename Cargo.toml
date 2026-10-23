@@ -1,0 +1,17 @@
+[package]
+name = "memrium-view"
+version = "0.1.0"
+edition = "2021"
+description = "An image viewer with gliding zoom and neighbour preloading."
+license = "MIT"
+repository = "https://github.com/Supchik22/memrium-view"
+
+[[bin]]
+name = "memrium_view"
+path = "src/main.rs"
+
+[dependencies]
+chebrium = { git = "https://github.com/Supchik22/chebrium" }
+memrium-de = { git = "https://github.com/Supchik22/memrium" }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "tiff", "ico"] }
+resvg = { version = "0.45", default-features = false, features = ["raster-images"] }
