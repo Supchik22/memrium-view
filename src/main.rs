@@ -141,6 +141,8 @@ struct Viewer {
     fullscreen: bool,
     title: String,
     note: String,
+    /// the right-click menu: where it was opened
+    ctx: Option<[f32; 2]>,
 }
 
 impl Viewer {
@@ -182,6 +184,7 @@ impl Viewer {
             fullscreen: false,
             title: String::new(),
             note: String::new(),
+            ctx: None,
         };
         v.want_around();
         v
@@ -355,6 +358,7 @@ impl App for Viewer {
     fn menus(&self) -> Vec<Menu> {
         vec![
             Menu::new("File", vec![Item::new(1, "Move to Trash").key("Delete"), Item::sep(), Item::new(2, "Close").key("Q")]),
+            Menu::new("Edit", vec![Item::new(30, "Copy Picture").key("Ctrl+C").enabled(self.current().is_some()), Item::new(31, "Copy File Path").enabled(self.current().is_some())]),
             Menu::new(
                 "View",
                 vec![
@@ -374,6 +378,16 @@ impl App for Viewer {
         ]
     }
 
+    fn raw_pointer(&mut self, event: &app::PointerEvt, _mods: &app::Modifiers, host: &mut Host) -> bool {
+        // the right button opens the menu where the pointer is
+        if let app::PointerKind::Press { button: 0x111, .. } = event.kind {
+            self.ctx = if self.current().is_some() { Some(event.pos) } else { None };
+            host.redraw = true;
+            return true;
+        }
+        false
+    }
+
     fn menu_action(&mut self, id: u32, host: &mut Host) {
         let key = match id {
             1 => Key::Delete,
@@ -390,6 +404,8 @@ impl App for Viewer {
             21 => Key::Left,
             22 => Key::Home,
             23 => Key::End,
+            30 => return self.copy_picture(host),
+            31 => return self.copy_path(host),
             _ => return,
         };
         self.key(key, KeyMods::default(), host);
@@ -398,6 +414,9 @@ impl App for Viewer {
     fn key(&mut self, key: Key, mods: KeyMods, host: &mut Host) {
         host.redraw = true;
         self.touch();
+        if mods.ctrl && key == Key::Char('c') {
+            return self.copy_picture(host);
+        }
         match key {
             Key::Right | Key::Down | Key::PageDown | Key::Char(' ') => self.go(1),
             Key::Left | Key::Up | Key::PageUp | Key::Backspace => self.go(-1),
@@ -622,6 +641,37 @@ impl App for Viewer {
             }
         }
 
+        // ---- the right-click menu
+        if let Some(at) = self.ctx {
+            let entries = [("copy", tr("Copy Picture").into_owned()), ("link", tr("Copy File Path").into_owned())];
+            let (mw, rh) = (190.0, 32.0);
+            let mh = entries.len() as f32 * rh + 12.0;
+            let (mx, my) = (at[0].min(w - mw - 8.0).max(8.0), at[1].min(h - mh - 8.0).max(8.0));
+            ui.glass([mx, my, mw, mh], 12.0, 1.3);
+            let mut chosen = None;
+            for (i, (icon, label)) in entries.iter().enumerate() {
+                let r = [mx + 6.0, my + 6.0 + i as f32 * rh, mw - 12.0, rh];
+                if ui.hit(r) {
+                    ui.fill(r, 8.0, [1.0; 3], 0.16);
+                    if ui.click {
+                        chosen = Some(i);
+                    }
+                }
+                ui.glyph(r[0] + 16.0, r[1] + rh / 2.0, 15.0, icon, [1.0; 3], 0.85);
+                ui.text_raw(r[0] + 34.0, r[1] + rh / 2.0 + 4.5, label, 13.0, false, [1.0; 3], 0.95, Align::Left);
+            }
+            // any click closes it, on an entry or off it
+            if ui.click {
+                self.ctx = None;
+                host.redraw = true;
+            }
+            match chosen {
+                Some(0) => self.copy_picture(host),
+                Some(1) => self.copy_path(host),
+                _ => {}
+            }
+        }
+
         // window title follows the picture
         let title = path.as_ref().and_then(|p| p.file_name()).map(|n| format!("{} - {}", n.to_string_lossy(), tr("Pictures"))).unwrap_or_else(|| tr("Pictures").into_owned());
         if title != self.title {
@@ -636,6 +686,46 @@ impl App for Viewer {
 }
 
 impl Viewer {
+    /// The picture on the screen as PNG on the clipboard.
+    fn copy_picture(&mut self, host: &mut Host) {
+        let Some(path) = self.current().cloned() else { return };
+        // what is on the screen (turned, if it was), not the file as it lies on the disk
+        let png = {
+            let pic = self.cache.get(&path);
+            pic.and_then(|pic| {
+                let (px, w, h) = pic.pixels();
+                // premultiplied BGRA to straight RGBA
+                let mut rgba = Vec::with_capacity(px.len());
+                for p in px.chunks_exact(4) {
+                    let a = p[3] as u32;
+                    let un = |c: u8| if a == 0 || a == 255 { c } else { ((c as u32 * 255 + a / 2) / a).min(255) as u8 };
+                    rgba.extend_from_slice(&[un(p[2]), un(p[1]), un(p[0]), p[3]]);
+                }
+                let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
+                let mut out = Vec::new();
+                let enc = image::codecs::png::PngEncoder::new_with_quality(std::io::Cursor::new(&mut out), image::codecs::png::CompressionType::Fast, image::codecs::png::FilterType::Adaptive);
+                img.write_with_encoder(enc).ok()?;
+                Some(out)
+            })
+        };
+        match png {
+            Some(png) => {
+                host.copy_image = Some(png);
+                self.note = tr("Picture copied").into_owned();
+            }
+            None => self.note = tr("Could not copy the picture").into_owned(),
+        }
+        host.redraw = true;
+    }
+
+    fn copy_path(&mut self, host: &mut Host) {
+        if let Some(p) = self.current() {
+            host.copy = Some(p.to_string_lossy().to_string());
+            self.note = tr("Path copied").into_owned();
+            host.redraw = true;
+        }
+    }
+
     fn zoom_step(&mut self, factor: f32) {
         let cur = if self.mode == Zoom::Custom { self.zoom } else { self.zoom.max(0.02) };
         self.zoom_at(factor, [0.0, 0.0], cur);
